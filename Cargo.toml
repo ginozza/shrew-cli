@@ -8,7 +8,7 @@ homepage.workspace = true
 description = "CLI runner for Shrew .sw deep learning programs"
 
 [[bin]]
-name = "shrew"
+name = "shrew-cli"
 path = "src/main.rs"
 
 [dependencies]
