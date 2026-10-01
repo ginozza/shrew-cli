@@ -1,18 +1,22 @@
 // shrew CLI — Command-line runner for .sw deep learning programs
 //
 // USAGE:
-//   shrew dump model.sw         # Print the lowered IR graph
-//   shrew validate model.sw     # Validate a .sw program
-//   shrew bench model.sw        # Benchmark forward pass
-//   shrew info model.sw         # Show model summary (params, ops, shapes)
+//   shrew dump model.sw             # Print the lowered IR graph
+//   shrew validate model.sw         # Validate a .sw program
+//   shrew bench model.sw            # Benchmark forward pass
+//   shrew info model.sw             # Show model summary (params, ops, shapes)
+//   shrew export model.sw -o m.onnx # Export IR graph to ONNX model
 //
 // OPTIONS:
-//   --batch N      Set batch dimension (default: 1)
+//   --batch N            Set batch dimension (default: 1)
 //   --dtype f32|f64|f16  Set default dtype (default: f32)
-//   --verbose      Print detailed execution info
+//   --output, -o <file>  Output file for export (default: <model>.onnx)
+//   --graph <name>       Select graph name to export
+//   --verbose            Print detailed execution info
 
 use std::env;
 use std::fs;
+use std::path::Path;
 use std::process;
 use std::time::Instant;
 
@@ -27,7 +31,7 @@ fn main() {
     let command = args[1].as_str();
 
     match command {
-        "dump" | "validate" | "bench" | "info" => {
+        "dump" | "validate" | "bench" | "info" | "export" => {
             if args.len() < 3 {
                 eprintln!("Error: missing .sw file path");
                 eprintln!("Usage: shrew {command} <file.sw> [options]");
@@ -64,6 +68,8 @@ struct CliOptions {
     batch_size: usize,
     dtype: String,
     verbose: bool,
+    output: Option<String>,
+    graph: Option<String>,
 }
 
 fn parse_options(args: &[String]) -> CliOptions {
@@ -71,6 +77,8 @@ fn parse_options(args: &[String]) -> CliOptions {
         batch_size: 1,
         dtype: "f32".to_string(),
         verbose: false,
+        output: None,
+        graph: None,
     };
 
     let mut i = 0;
@@ -86,6 +94,18 @@ fn parse_options(args: &[String]) -> CliOptions {
                 i += 1;
                 if i < args.len() {
                     opts.dtype = args[i].clone();
+                }
+            }
+            "--output" | "-o" => {
+                i += 1;
+                if i < args.len() {
+                    opts.output = Some(args[i].clone());
+                }
+            }
+            "--graph" | "-g" => {
+                i += 1;
+                if i < args.len() {
+                    opts.graph = Some(args[i].clone());
                 }
             }
             "--verbose" | "-v" => {
@@ -112,6 +132,7 @@ fn run_command(command: &str, file_path: &str, opts: &CliOptions) -> Result<(), 
         "validate" => cmd_validate(&source, file_path),
         "bench" => cmd_bench(&source, file_path, opts),
         "info" => cmd_info(&source, file_path, opts),
+        "export" => cmd_export(&source, file_path, opts),
         _ => Err(format!("Unknown command: {command}")),
     }
 }
@@ -410,6 +431,54 @@ fn cmd_info(source: &str, file_path: &str, _opts: &CliOptions) -> Result<(), Str
     Ok(())
 }
 
+// export — Export IR graph to ONNX model file
+
+fn cmd_export(source: &str, file_path: &str, opts: &CliOptions) -> Result<(), String> {
+    let ast = shrew_ir::parse(source).map_err(|e| format!("Parse error: {e}"))?;
+    let mut ir = shrew_ir::lower(&ast).map_err(|e| format!("Lowering error: {e}"))?;
+
+    shrew_ir::infer_shapes(&mut ir);
+    let _ = shrew_ir::optimize(&mut ir);
+
+    if ir.graphs.is_empty() {
+        return Err("No graphs found in program to export".to_string());
+    }
+
+    let target_graph = if let Some(ref gname) = opts.graph {
+        ir.graphs
+            .iter()
+            .find(|g| g.name == *gname)
+            .ok_or_else(|| format!("Graph '{gname}' not found"))?
+    } else {
+        &ir.graphs[0]
+    };
+
+    let out_path = if let Some(ref out) = opts.output {
+        out.clone()
+    } else {
+        let p = Path::new(file_path);
+        p.with_extension("onnx")
+            .to_string_lossy()
+            .to_string()
+    };
+
+    println!("=== Exporting to ONNX: {file_path} ===");
+    println!("Graph:   {}", target_graph.name);
+    println!("Inputs:  {}", target_graph.inputs.len());
+    println!("Outputs: {}", target_graph.outputs.len());
+    println!("Nodes:   {}", target_graph.nodes.len());
+
+    shrew::onnx::export_ir_graph(&out_path, target_graph)
+        .map_err(|e| format!("ONNX export error: {e}"))?;
+
+    let size = fs::metadata(&out_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    println!("Successfully exported to: {out_path} ({size} bytes)");
+    Ok(())
+}
+
 // Helpers
 
 fn parse_dtype(s: &str) -> Result<shrew_core::DType, String> {
@@ -436,11 +505,14 @@ fn print_usage() {
     println!("  validate   Check a .sw program for errors");
     println!("  bench      Benchmark forward pass performance");
     println!("  info       Show model summary (params, ops, shapes)");
+    println!("  export     Export IR graph to ONNX model");
     println!("  version    Print version");
     println!("  help       Show this help");
     println!();
     println!("OPTIONS:");
-    println!("  --batch N        Set batch dimension (default: 1)");
-    println!("  --dtype <type>   Set default dtype: f32, f64, f16 (default: f32)");
-    println!("  --verbose, -v    Print detailed output");
+    println!("  --batch N            Set batch dimension (default: 1)");
+    println!("  --dtype <type>       Set default dtype: f32, f64, f16 (default: f32)");
+    println!("  --output, -o <file>  Output ONNX file path (default: <model>.onnx)");
+    println!("  --graph, -g <name>   Select graph name to export");
+    println!("  --verbose, -v        Print detailed output");
 }
