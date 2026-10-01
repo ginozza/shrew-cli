@@ -31,7 +31,7 @@ fn main() {
     let command = args[1].as_str();
 
     match command {
-        "dump" | "validate" | "bench" | "info" | "export" => {
+        "dump" | "validate" | "bench" | "info" | "export" | "train" => {
             if args.len() < 3 {
                 eprintln!("Error: missing .sw file path");
                 eprintln!("Usage: shrew {command} <file.sw> [options]");
@@ -133,6 +133,7 @@ fn run_command(command: &str, file_path: &str, opts: &CliOptions) -> Result<(), 
         "bench" => cmd_bench(&source, file_path, opts),
         "info" => cmd_info(&source, file_path, opts),
         "export" => cmd_export(&source, file_path, opts),
+        "train" => cmd_train(file_path, opts),
         _ => Err(format!("Unknown command: {command}")),
     }
 }
@@ -494,6 +495,31 @@ fn parse_dtype(s: &str) -> Result<shrew_core::DType, String> {
     }
 }
 
+fn cmd_train(file_path: &str, opts: &CliOptions) -> Result<(), String> {
+    let dtype = match opts.dtype.as_str() {
+        "f64" => shrew_core::DType::F64,
+        _ => shrew_core::DType::F32,
+    };
+    let config = shrew::exec::RuntimeConfig::default().with_dtype(dtype);
+    println!("=== Training Model: {file_path} ===");
+    let start = Instant::now();
+    let (trainer, res) = shrew::exec::train_file::<shrew_cpu::CpuBackend>(file_path, shrew_cpu::CpuDevice, config)
+        .map_err(|e| format!("{e}"))?;
+    let elapsed = start.elapsed();
+    println!("Model Graph: {}", trainer.model_graph_name());
+    println!("Epochs trained: {}", res.epochs.len());
+    let step = (res.epochs.len() / 10).max(1);
+    for log in &res.epochs {
+        if log.epoch % step == 0 || log.epoch + 1 == res.epochs.len() {
+            println!("  [Epoch {:3}] Loss: {:.6}", log.epoch + 1, log.loss);
+        }
+    }
+    println!("Final loss: {:.6}", res.final_loss);
+    println!("Elapsed time: {:.2?}", elapsed);
+    println!(">>> SUCCESS: Training complete entirely driven by .sw configuration! <<<");
+    Ok(())
+}
+
 fn print_usage() {
     println!("Shrew — Deep Learning CLI");
     println!();
@@ -501,6 +527,7 @@ fn print_usage() {
     println!("  shrew <command> <file.sw> [options]");
     println!();
     println!("COMMANDS:");
+    println!("  train      Train model using embedded dataset & config in .sw");
     println!("  dump       Print the lowered IR graph");
     println!("  validate   Check a .sw program for errors");
     println!("  bench      Benchmark forward pass performance");
