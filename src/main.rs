@@ -31,10 +31,10 @@ fn main() {
     let command = args[1].as_str();
 
     match command {
-        "dump" | "validate" | "bench" | "info" | "export" | "train" => {
+        "run" | "import" | "dump" | "validate" | "bench" | "info" | "export" | "train" => {
             if args.len() < 3 {
-                eprintln!("Error: missing .sw file path");
-                eprintln!("Usage: shrew {command} <file.sw> [options]");
+                eprintln!("Error: missing file path");
+                eprintln!("Usage: shrew {command} <file> [options]");
                 process::exit(1);
             }
             let file_path = &args[2];
@@ -124,16 +124,35 @@ fn parse_options(args: &[String]) -> CliOptions {
 // Command dispatch
 
 fn run_command(command: &str, file_path: &str, opts: &CliOptions) -> Result<(), String> {
-    let source =
-        fs::read_to_string(file_path).map_err(|e| format!("Cannot read '{file_path}': {e}"))?;
-
     match command {
-        "dump" => cmd_dump(&source, file_path, opts),
-        "validate" => cmd_validate(&source, file_path),
-        "bench" => cmd_bench(&source, file_path, opts),
-        "info" => cmd_info(&source, file_path, opts),
-        "export" => cmd_export(&source, file_path, opts),
+        "run" => cmd_run(file_path, opts),
+        "import" => cmd_import(file_path, opts),
         "train" => cmd_train(file_path, opts),
+        "dump" => {
+            let source =
+                fs::read_to_string(file_path).map_err(|e| format!("Cannot read '{file_path}': {e}"))?;
+            cmd_dump(&source, file_path, opts)
+        }
+        "validate" => {
+            let source =
+                fs::read_to_string(file_path).map_err(|e| format!("Cannot read '{file_path}': {e}"))?;
+            cmd_validate(&source, file_path)
+        }
+        "bench" => {
+            let source =
+                fs::read_to_string(file_path).map_err(|e| format!("Cannot read '{file_path}': {e}"))?;
+            cmd_bench(&source, file_path, opts)
+        }
+        "info" => {
+            let source =
+                fs::read_to_string(file_path).map_err(|e| format!("Cannot read '{file_path}': {e}"))?;
+            cmd_info(&source, file_path, opts)
+        }
+        "export" => {
+            let source =
+                fs::read_to_string(file_path).map_err(|e| format!("Cannot read '{file_path}': {e}"))?;
+            cmd_export(&source, file_path, opts)
+        }
         _ => Err(format!("Unknown command: {command}")),
     }
 }
@@ -495,19 +514,54 @@ fn parse_dtype(s: &str) -> Result<shrew_core::DType, String> {
     }
 }
 
+fn cmd_run(file_path: &str, opts: &CliOptions) -> Result<(), String> {
+    let dtype = match opts.dtype.as_str() {
+        "f64" => shrew_core::DType::F64,
+        _ => shrew_core::DType::F32,
+    };
+    let config = shrew::exec::RuntimeConfig::default().with_dtype(dtype);
+    let start = Instant::now();
+    let res = shrew::exec::run_file::<shrew_cpu::CpuBackend>(file_path, shrew_cpu::CpuDevice, config)
+        .map_err(|e| format!("{e}"))?;
+    let elapsed = start.elapsed();
+    if let Some(out) = res.output() {
+        println!("Output: {:?}", out);
+    } else {
+        println!("Execution finished successfully");
+    }
+    if opts.verbose {
+        println!("Time: {:.2?}", elapsed);
+    }
+    Ok(())
+}
+
+fn cmd_import(file_path: &str, opts: &CliOptions) -> Result<(), String> {
+    let output_path = opts.output.clone().unwrap_or_else(|| {
+        let p = Path::new(file_path);
+        p.with_extension("sw").to_string_lossy().to_string()
+    });
+    let graph = shrew::onnx::load_onnx_graph(file_path)
+        .map_err(|e| format!("Failed to read ONNX file '{file_path}': {e}"))?;
+    let sw_code = shrew::onnx::onnx_graph_to_sw(&graph);
+    fs::write(&output_path, &sw_code)
+        .map_err(|e| format!("Failed to write '{output_path}': {e}"))?;
+    println!("Imported {file_path} -> {output_path}");
+    Ok(())
+}
+
 fn cmd_train(file_path: &str, opts: &CliOptions) -> Result<(), String> {
     let dtype = match opts.dtype.as_str() {
         "f64" => shrew_core::DType::F64,
         _ => shrew_core::DType::F32,
     };
     let config = shrew::exec::RuntimeConfig::default().with_dtype(dtype);
-    println!("=== Training Model: {file_path} ===");
+    println!("Training {file_path}");
     let start = Instant::now();
     let (trainer, res) = shrew::exec::train_file::<shrew_cpu::CpuBackend>(file_path, shrew_cpu::CpuDevice, config)
         .map_err(|e| format!("{e}"))?;
     let elapsed = start.elapsed();
-    println!("Model Graph: {}", trainer.model_graph_name());
-    println!("Epochs trained: {}", res.epochs.len());
+    println!("Graph: {}", trainer.model_graph_name());
+    println!("Epochs: {}", res.epochs.len());
     let step = (res.epochs.len() / 10).max(1);
     for log in &res.epochs {
         if log.epoch % step == 0 || log.epoch + 1 == res.epochs.len() {
@@ -515,8 +569,7 @@ fn cmd_train(file_path: &str, opts: &CliOptions) -> Result<(), String> {
         }
     }
     println!("Final loss: {:.6}", res.final_loss);
-    println!("Elapsed time: {:.2?}", elapsed);
-    println!(">>> SUCCESS: Training complete entirely driven by .sw configuration! <<<");
+    println!("Time: {:.2?}", elapsed);
     Ok(())
 }
 
@@ -524,10 +577,12 @@ fn print_usage() {
     println!("Shrew — Deep Learning CLI");
     println!();
     println!("USAGE:");
-    println!("  shrew <command> <file.sw> [options]");
+    println!("  shrew <command> <file> [options]");
     println!();
     println!("COMMANDS:");
+    println!("  run        Run inference using embedded dataset & config in .sw");
     println!("  train      Train model using embedded dataset & config in .sw");
+    println!("  import     Import and decompile ONNX model to .sw source");
     println!("  dump       Print the lowered IR graph");
     println!("  validate   Check a .sw program for errors");
     println!("  bench      Benchmark forward pass performance");
@@ -539,7 +594,7 @@ fn print_usage() {
     println!("OPTIONS:");
     println!("  --batch N            Set batch dimension (default: 1)");
     println!("  --dtype <type>       Set default dtype: f32, f64, f16 (default: f32)");
-    println!("  --output, -o <file>  Output ONNX file path (default: <model>.onnx)");
+    println!("  --output, -o <file>  Output file path");
     println!("  --graph, -g <name>   Select graph name to export");
     println!("  --verbose, -v        Print detailed output");
 }
